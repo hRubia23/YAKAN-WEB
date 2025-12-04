@@ -381,7 +381,7 @@ class CustomOrder extends Model
      */
     public function markAsCompleted(): bool
     {
-        if ($this->status !== 'processing') {
+        if (!in_array($this->status, ['processing', 'in_production'])) {
             return false;
         }
 
@@ -398,6 +398,7 @@ class CustomOrder extends Model
             'pending' => 'Waiting for admin review',
             'price_quoted' => 'Price quoted - awaiting your decision',
             'approved' => 'Order approved - ready for payment',
+            'in_production' => 'Order in production',
             'processing' => 'Order in production',
             'completed' => 'Order completed',
             'rejected' => 'Order rejected',

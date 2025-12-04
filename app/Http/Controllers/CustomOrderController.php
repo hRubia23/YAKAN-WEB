@@ -9,6 +9,7 @@ use App\Models\Category;
 use App\Models\YakanPattern;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 
 class CustomOrderController extends Controller
 {
@@ -782,11 +783,27 @@ class CustomOrderController extends Controller
                 $customizationSettings = json_decode($validated['customization_settings'], true);
             }
             
+            // Normalize preview image to a stored file or lightweight URL to avoid bloating the session
+            $previewImageUrl = null;
+            $previewImagePath = null;
+            $rawPreview = trim($validated['preview_image'] ?? '');
+
+            if ($rawPreview !== '') {
+                if (str_starts_with($rawPreview, 'data:image')) {
+                    $previewImagePath = $this->savePreviewImage($rawPreview);
+                    $previewImageUrl = $previewImagePath ? Storage::url($previewImagePath) : null;
+                } elseif (strlen($rawPreview) < 2048) {
+                    // Allow small URLs but skip mega strings
+                    $previewImageUrl = $rawPreview;
+                }
+            }
+
             // Store pattern selection data - use 'pattern' key to match step4 expectations
             $wizardData['pattern'] = [
                 'selected_ids' => $validated['patterns'],
                 'selection_mode' => $validated['selection_mode'] ?? 'single',
-                'preview_image' => $validated['preview_image'] ?? null,
+                'preview_image' => $previewImageUrl,
+                'preview_image_path' => $previewImagePath,
                 'customization_settings' => $customizationSettings,
                 'created_at' => now()->toISOString(),
             ];
@@ -987,20 +1004,23 @@ class CustomOrderController extends Controller
         $wizardData = $request->session()->get('wizard');
 
         if (!$wizardData) {
-            return redirect()->route('custom_orders.create.choice')
-                ->with('error', 'Please start your custom order.');
+            \Log::error('No wizard data in session');
+            return redirect()->route('custom_orders.create.step1')
+                ->with('error', 'Session expired. Please start your custom order again.');
         }
 
         $isProductFlow = isset($wizardData['product']);
         $isFabricFlow = isset($wizardData['fabric']);
 
         if (!$isProductFlow && !$isFabricFlow) {
-            return redirect()->route('custom_orders.create.choice')
-                ->with('error', 'Please choose a product or fabric first.');
+            \Log::error('Neither product nor fabric flow detected', ['wizard_data' => $wizardData]);
+            return redirect()->route('custom_orders.create.step1')
+                ->with('error', 'Please select a fabric first.');
         }
 
         // Require a design selection for both flows
         if (!isset($wizardData['pattern']) && !isset($wizardData['design'])) {
+            \Log::error('No pattern or design in wizard data', ['wizard_data' => $wizardData]);
             return $isProductFlow
                 ? redirect()->route('custom_orders.create.product.customize')->with('error', 'Please customize your design first.')
                 : redirect()->route('custom_orders.create.pattern')->with('error', 'Please select a pattern first.');
@@ -1029,6 +1049,8 @@ class CustomOrderController extends Controller
                     $basePrice = $product->price;
                 }
             } else {
+                // For fabric flow, base price calculation
+                // Priority is optional since step3 might be skipped
                 if (isset($wizardData['details']['priority'])) {
                     switch ($wizardData['details']['priority']) {
                         case 'priority':
@@ -1039,11 +1061,18 @@ class CustomOrderController extends Controller
                             break;
                     }
                 }
+                
+                // Add cost based on fabric quantity
+                if (isset($wizardData['fabric']['quantity_meters'])) {
+                    $meters = (float) $wizardData['fabric']['quantity_meters'];
+                    // Add ₱500 per meter
+                    $basePrice += ($meters * 500);
+                }
             }
 
             // Handle pattern-based vs visual design
             $imagePath = null;
-            $patterns = null;
+            $patternsArray = [];
             $complexity = 'medium';
             $designMetadata = null;
             $designMethod = 'pattern';
@@ -1051,9 +1080,9 @@ class CustomOrderController extends Controller
             if (isset($wizardData['design']) && $wizardData['design']) {
                 // Visual design flow
                 $imagePath = $this->saveDesignImage($wizardData['design']['image']);
-                $patterns = json_encode($this->extractPatternsFromMetadata($wizardData['design']['metadata']));
-                $complexity = $this->calculateComplexityFromMetadata($wizardData['design']['metadata']);
-                $designMetadata = $wizardData['design']['metadata'];
+                $designMetadata = $this->sanitizeDesignMetadata($wizardData['design']['metadata'] ?? []);
+                $patternsArray = $this->extractPatternsFromMetadata($designMetadata);
+                $complexity = $this->calculateComplexityFromMetadata($designMetadata);
                 $designMethod = 'visual';
             } elseif (isset($wizardData['pattern'])) {
                 // Pattern-based flow (supports string or array)
@@ -1067,9 +1096,10 @@ class CustomOrderController extends Controller
                     $patternDifficulty = $wizardData['pattern']['difficulty'] ?? $patternDifficulty;
                     
                     // Extract preview image from pattern data
-                    if (isset($wizardData['pattern']['preview_image'])) {
+                    if (isset($wizardData['pattern']['preview_image_path'])) {
+                        $imagePath = $wizardData['pattern']['preview_image_path'];
+                    } elseif (isset($wizardData['pattern']['preview_image'])) {
                         $imagePath = $wizardData['pattern']['preview_image'];
-                        \Log::info('Pattern preview image found', ['preview_length' => strlen($imagePath)]);
                     }
                 } else {
                     $patternName = $wizardData['pattern'];
@@ -1091,7 +1121,7 @@ class CustomOrderController extends Controller
                     }
                 }
 
-                $patterns = json_encode([$patternName]);
+                $patternsArray = array_values(array_filter([$patternName]));
                 $complexity = $patternDifficulty;
                 
                 // Include customization settings and preview in metadata
@@ -1114,10 +1144,10 @@ class CustomOrderController extends Controller
                 $order->specifications = $request->input('specifications') ?? ($wizardData['details']['description'] ?? null);
                 $order->quantity = max(1, (int) $request->input('quantity', 1));
                 $order->status = 'pending';
-                $order->payment_status = 'unpaid';
+                $order->payment_status = 'pending';
                 $order->estimated_price = $basePrice;
-                if ($patterns) {
-                    $order->patterns = json_decode($patterns, true);
+                if (!empty($patternsArray)) {
+                    $order->patterns = $patternsArray;
                 }
                 if ($imagePath) {
                     $order->design_upload = $imagePath;
@@ -1125,33 +1155,43 @@ class CustomOrderController extends Controller
                 $order->save();
                 $customOrder = $order;
             } else {
-                // Existing fabric flow creation (unchanged)
+                // Fabric flow creation - use request input for specifications
+                $specifications = $request->input('specifications', '');
+                
+                // Add fabric details to specifications if empty
+                if (empty($specifications)) {
+                    $specifications = "Custom Fabric Order\n";
+                    $specifications .= "Fabric Type: " . ($wizardData['fabric']['type'] ?? 'N/A') . "\n";
+                    $specifications .= "Quantity: " . ($wizardData['fabric']['quantity_meters'] ?? 0) . " meters\n";
+                    $specifications .= "Intended Use: " . ($wizardData['fabric']['intended_use'] ?? 'N/A');
+                }
+                
                 $customOrder = CustomOrder::create([
                     'user_id' => $userId,
                     'product_id' => null, // No product for fabric orders
-                    'specifications' => ($wizardData['details']['description'] ?? 'Custom Fabric Order') . "\n\n" . ($wizardData['details']['special_instructions'] ?? ''),
-                    'patterns' => $patterns,
-                    // Note: 'complexity' column doesn't exist in DB schema
-                    'quantity' => 1,
+                    'specifications' => $specifications,
+                    'patterns' => $patternsArray ?: null,
+                    'quantity' => max(1, (int) $request->input('quantity', 1)),
                     'estimated_price' => $basePrice,
                     'final_price' => $basePrice,
                     'status' => 'pending',
-                    'payment_status' => 'unpaid',
+                    'payment_status' => 'pending',
                     'design_upload' => $imagePath,
                     'design_method' => $designMethod,
                     'design_metadata' => $designMetadata,
-                    // Note: order_name, category, size, priority, description, special_instructions columns don't exist in DB
-                    // This data is preserved in 'specifications' field above
                     
                     // Fabric-specific fields
-                    'fabric_type' => $wizardData['fabric']['type'],
-                    'fabric_quantity_meters' => $wizardData['fabric']['quantity_meters'],
-                    'intended_use' => $wizardData['fabric']['intended_use'],
+                    'fabric_type' => $wizardData['fabric']['type'] ?? null,
+                    'fabric_quantity_meters' => $wizardData['fabric']['quantity_meters'] ?? null,
+                    'intended_use' => $wizardData['fabric']['intended_use'] ?? null,
                     'fabric_specifications' => $wizardData['fabric']['fabric_specifications'] ?? null,
                     'special_requirements' => $wizardData['fabric']['special_requirements'] ?? null,
-                    
-                    // Pattern customization fields - these also don't exist as columns
-                    // 'preview_image' and 'customization_settings' stored in design_upload and design_metadata
+                ]);
+                
+                \Log::info('Fabric order created successfully', [
+                    'order_id' => $customOrder->id,
+                    'fabric_type' => $customOrder->fabric_type,
+                    'quantity' => $customOrder->quantity,
                 ]);
             }
 
@@ -1167,7 +1207,7 @@ class CustomOrderController extends Controller
                 route('custom_orders.show', $customOrder->id),
                 [
                     'order_id' => $customOrder->id,
-                    'order_name' => $wizardData['details']['order_name'] ?? 'Custom Order',
+                    'order_name' => 'Custom Order #' . $customOrder->id,
                     'estimated_price' => $customOrder->estimated_price
                 ]
             );
@@ -1184,7 +1224,7 @@ class CustomOrderController extends Controller
                     [
                         'order_id' => $customOrder->id,
                         'customer_name' => $customOrder->user->name,
-                        'order_name' => $wizardData['details']['order_name'] ?? 'Custom Order',
+                        'order_name' => 'Custom Order #' . $customOrder->id,
                         'estimated_price' => $customOrder->estimated_price
                     ]
                 );
@@ -1968,6 +2008,40 @@ class CustomOrderController extends Controller
     }
 
     /**
+     * Persist a preview image data URI to public storage and return the path
+     */
+    private function savePreviewImage(string $dataUri): ?string
+    {
+        if (!str_starts_with($dataUri, 'data:image')) {
+            return null;
+        }
+
+        if (!preg_match('/^data:image\/(\w+);base64,/', $dataUri, $matches)) {
+            return null;
+        }
+
+        $imageType = strtolower($matches[1]);
+        $allowedTypes = ['png', 'jpg', 'jpeg', 'webp'];
+        if (!in_array($imageType, $allowedTypes, true)) {
+            $imageType = 'png';
+        }
+
+        $base64Data = substr($dataUri, strpos($dataUri, ',') + 1);
+        $imageData = base64_decode($base64Data, true);
+
+        if ($imageData === false) {
+            return null;
+        }
+
+        $filename = 'pattern_preview_' . Str::uuid() . '.' . $imageType;
+        $path = 'custom_orders/pattern_previews/' . $filename;
+
+        Storage::disk('public')->put($path, $imageData);
+
+        return $path;
+    }
+
+    /**
      * Extract pattern information from design metadata
      */
     private function extractPatternsFromMetadata($metadata)
@@ -1981,6 +2055,51 @@ class CustomOrderController extends Controller
         }
         
         return array_unique($patterns);
+    }
+
+    /**
+     * Remove large/base64 blobs from design metadata before persisting
+     */
+    private function sanitizeDesignMetadata($metadata): array
+    {
+        $stripKeys = ['preview', 'thumbnail', 'image', 'data', 'blob', 'base64', 'svg'];
+        $maxStringLength = 1000; // prevent multi-MB strings from being stored
+
+        $walker = function ($value) use (&$walker, $stripKeys, $maxStringLength) {
+            if (is_array($value)) {
+                $result = [];
+                foreach ($value as $key => $val) {
+                    $lowerKey = strtolower((string) $key);
+                    if (in_array($lowerKey, $stripKeys, true)) {
+                        continue;
+                    }
+                    $result[$key] = $walker($val);
+                }
+                return $result;
+            }
+
+            if (is_string($value)) {
+                $trimmed = trim($value);
+                if (str_starts_with($trimmed, 'data:image')) {
+                    return null;
+                }
+                if (strlen($value) > $maxStringLength) {
+                    return substr($value, 0, $maxStringLength) . '... [truncated]';
+                }
+                return $value;
+            }
+
+            return $value;
+        };
+
+        $cleaned = $walker($metadata ?? []);
+
+        // Drop nulls produced by stripping
+        if (is_array($cleaned)) {
+            $cleaned = array_filter($cleaned, fn($v) => $v !== null);
+        }
+
+        return $cleaned;
     }
 
     /**

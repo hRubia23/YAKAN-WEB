@@ -40,7 +40,7 @@ class CustomOrderService
 
     public function updateOrderStatus(CustomOrder $order, string $status, array $data = [])
     {
-        $validStatuses = ['pending', 'processing', 'completed', 'cancelled'];
+        $validStatuses = ['pending', 'processing', 'in_production', 'completed', 'cancelled'];
         
         if (!in_array($status, $validStatuses)) {
             throw new \InvalidArgumentException("Invalid status: {$status}");
@@ -75,6 +75,7 @@ class CustomOrderService
             'total_orders' => CustomOrder::count(),
             'pending_orders' => CustomOrder::where('status', 'pending')->count(),
             'processing_orders' => CustomOrder::where('status', 'processing')->count(),
+            'in_production_orders' => CustomOrder::where('status', 'in_production')->count(),
             'completed_orders' => CustomOrder::where('status', 'completed')->count(),
             'cancelled_orders' => CustomOrder::where('status', 'cancelled')->count(),
             'total_revenue' => CustomOrder::where('status', 'completed')->sum('final_price'),

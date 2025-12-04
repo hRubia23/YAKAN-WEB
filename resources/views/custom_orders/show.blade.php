@@ -208,7 +208,33 @@
                     </div>
                     <div class="p-6">
                         <!-- Pattern Preview Image -->
-                        @if(isset($order->preview_image) && $order->preview_image)
+                        @php
+                            $previewUrl = null;
+                            $candidate = $order->preview_image ?? null;
+
+                            if ($candidate) {
+                                if (str_starts_with($candidate, 'data:image')) {
+                                    $previewUrl = $candidate;
+                                } elseif (str_starts_with($candidate, 'custom_orders/') || str_starts_with($candidate, 'custom_designs/')) {
+                                    $previewUrl = asset('storage/' . $candidate);
+                                } elseif (str_starts_with($candidate, 'http')) {
+                                    $previewUrl = $candidate;
+                                }
+                            }
+
+                            // Fallback to design_upload if preview_image is empty
+                            if (!$previewUrl && $order->design_upload) {
+                                if (str_starts_with($order->design_upload, 'data:image')) {
+                                    $previewUrl = $order->design_upload;
+                                } elseif (str_starts_with($order->design_upload, 'custom_orders/') || str_starts_with($order->design_upload, 'custom_designs/')) {
+                                    $previewUrl = asset('storage/' . $order->design_upload);
+                                } else {
+                                    $previewUrl = asset('storage/' . ltrim($order->design_upload, '/'));
+                                }
+                            }
+                        @endphp
+
+                        @if($previewUrl)
                         <div class="mb-6">
                             <div class="bg-gradient-to-br from-gray-50 to-gray-100 rounded-xl p-4 border-2 border-purple-200">
                                 <h3 class="text-sm font-semibold text-gray-700 mb-3 flex items-center">
@@ -219,7 +245,7 @@
                                     Your Customized Pattern Preview
                                 </h3>
                                 <div class="bg-white rounded-lg p-3 shadow-inner">
-                                    <img src="{{ $order->preview_image }}" 
+                                     <img src="{{ $previewUrl }}" 
                                          alt="Pattern Preview" 
                                          class="w-full h-auto rounded-lg border-2 border-gray-200"
                                          style="max-height: 400px; object-fit: contain;">
@@ -329,13 +355,12 @@
                     <div class="p-6">
                         <div class="relative group">
                             @php
-                                // Check if path starts with 'custom_orders/' (new uploads disk) or is base64
                                 if (str_starts_with($order->design_upload, 'data:image')) {
                                     $designUrl = $order->design_upload;
-                                } elseif (str_starts_with($order->design_upload, 'custom_orders/')) {
-                                    $designUrl = asset('uploads/' . $order->design_upload);
-                                } else {
+                                } elseif (str_starts_with($order->design_upload, 'custom_orders/') || str_starts_with($order->design_upload, 'custom_designs/')) {
                                     $designUrl = asset('storage/' . $order->design_upload);
+                                } else {
+                                    $designUrl = asset('storage/' . ltrim($order->design_upload, '/'));
                                 }
                             @endphp
                             <img src="{{ $designUrl }}" 

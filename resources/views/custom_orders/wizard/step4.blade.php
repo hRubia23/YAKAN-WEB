@@ -96,8 +96,20 @@
                                 Patterns Applied
                             </h5>
                             
+                            @php
+                                $patternPreviewUrl = null;
+                                $rawPreview = $wizardData['pattern']['preview_image'] ?? null;
+                                $storedPath = $wizardData['pattern']['preview_image_path'] ?? null;
+
+                                if (!empty($rawPreview)) {
+                                    $patternPreviewUrl = $rawPreview; // already url or data URI
+                                } elseif (!empty($storedPath)) {
+                                    $patternPreviewUrl = Storage::url($storedPath);
+                                }
+                            @endphp
+
                             <!-- Pattern Preview Image -->
-                            @if(isset($wizardData['pattern']['preview_image']) && $wizardData['pattern']['preview_image'])
+                            @if($patternPreviewUrl)
                             <div class="mb-6">
                                 <div class="bg-gradient-to-br from-purple-50 to-blue-50 rounded-xl p-4 border-2 border-purple-300 shadow-lg">
                                     <div class="flex items-center justify-between mb-3">
@@ -111,7 +123,7 @@
                                         <span class="px-3 py-1 bg-green-100 text-green-700 text-xs font-bold rounded-full">Final Preview</span>
                                     </div>
                                     <div class="bg-white rounded-lg p-3 shadow-inner">
-                                        <img src="{{ $wizardData['pattern']['preview_image'] }}" 
+                                        <img src="{{ $patternPreviewUrl }}" 
                                              alt="Pattern Preview" 
                                              class="w-full h-auto rounded-lg border-2 border-purple-200 shadow-md"
                                              style="max-height: 350px; object-fit: contain;">
